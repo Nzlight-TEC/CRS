@@ -1,0 +1,258 @@
+import Enemy from "../entities/Enemy/enemy.js";
+
+export default class SpawnDirector {
+    constructor(scene) {
+        this.scene = scene;
+        this.player = null;
+
+        this.elapsedTime = 0;
+
+        this.baseSpawnRate = 1.0;
+        this.spawnAccumulator = 0;
+
+        this.baseMaxEnemies = 25;
+
+        // 🧩 COMPOSIÇÃO
+        this.enemyPool = ["chaser"];
+
+        this.enemyWeights = {
+            chaser: 5,
+            shooter: 2,
+            tank: 1,
+            elite: 0.5
+        };
+
+        this.unlocks = [
+            { time: 120, type: "shooter" },
+            { time: 300, type: "tank" },
+            { time: 420, type: "elite" }
+        ];
+
+        //eventos
+        this.event = {
+            active: false,
+            type: null,
+            timer: 0,
+            totalEnemies: 0,
+            spawnedEnemies: 0,
+            aliveEnemies: 0
+        };
+
+        this.hordeNumber = 0;
+        this.baseHordeSize = 18;
+        this.hordeSizeGrowth = 6;
+        this.hordeCooldown = 6;
+        this.nextEventAt = 3;
+
+        //SPAWN
+        this.spawnRadius = 450;
+        this.spawnDelay = 120;
+        this.lastSpawnTime = 0;
+
+        //LIMITES
+        this.activePerType = {};
+        this.maxPerType = {
+            chaser: 20,
+            shooter: 8,
+            tank: 5,
+            elite: 2
+        };
+    }
+
+    // ===================================================
+    update(time, delta) {
+        if (!this.scene.player) return;
+        if (!this.player) this.player = this.scene.player;
+
+        const dt = delta / 1000;
+        this.elapsedTime += dt;
+
+        this.updateUnlocks();
+        this.updateEvents(dt);
+
+        if (!this.event.active || this.event.type !== "horde") return;
+        if (this.event.spawnedEnemies >= this.event.totalEnemies) return;
+
+        const maxEnemies = this.getMaxEnemies();
+        const alive = this.scene.enemies.countActive(true);
+        if (alive >= maxEnemies) return;
+
+        this.spawnAccumulator += this.getSpawnRate() * dt;
+
+        if (
+            this.spawnAccumulator >= 1 &&
+            time - this.lastSpawnTime >= this.spawnDelay
+        ) {
+            const spawned = this.spawnEnemyFromPool();
+
+            if (spawned) {
+                this.spawnAccumulator -= 1;
+                this.lastSpawnTime = time;
+            }
+        }
+    }
+
+    // ===================================================
+    getSpawnRate() {
+        let rate = this.baseSpawnRate;
+
+        // Progressão lenta
+        rate += Math.min(this.elapsedTime / 300, 1.5);
+
+        if (this.event.active && this.event.type === "horde") {
+            rate *= 1.8;
+        }
+
+        return rate;
+    }
+
+    getMaxEnemies() {
+        let max = this.baseMaxEnemies;
+
+        max += Math.floor(this.elapsedTime / 120) * 3;
+
+        if (this.event.active && this.event.type === "horde") {
+            max += 10;
+        }
+
+        return max;
+    }
+
+    getHordeSize(hordeNumber = this.hordeNumber + 1) {
+        return this.baseHordeSize + (hordeNumber - 1) * this.hordeSizeGrowth;
+    }
+
+    // ===================================================
+    updateUnlocks() {
+        this.unlocks.forEach(u => {
+            if (this.elapsedTime >= u.time && !this.enemyPool.includes(u.type)) {
+                this.enemyPool.push(u.type);
+                console.log(`🔓 ${u.type} liberado`);
+            }
+        });
+    }
+
+    // ===================================================
+    spawnEnemyFromPool() {
+        const pool = [];
+
+        this.enemyPool.forEach(type => {
+            const active = this.activePerType[type] ?? 0;
+            const limit = this.maxPerType[type] ?? 99;
+            if (active >= limit) return;
+
+            const weight = this.enemyWeights[type] ?? 1;
+            for (let i = 0; i < weight; i++) pool.push(type);
+        });
+
+        if (pool.length === 0) return;
+
+        const type = Phaser.Utils.Array.GetRandom(pool);
+        const pos = this.getSpawnPosition();
+        if (!pos) return;
+
+        return this.spawnEnemy(type, pos.x, pos.y);
+    }
+
+    // ===================================================
+    spawnEnemy(type, x, y) {
+        const enemy = new Enemy(this.scene, x, y, type);
+        enemy.setTarget(this.scene.player);
+
+        this.scene.enemies.add(enemy);
+        this.activePerType[type] = (this.activePerType[type] ?? 0) + 1;
+
+        enemy.once("destroy", () => {
+            this.activePerType[type]--;
+
+            if (enemy.hordeEnemy) {
+                this.event.aliveEnemies = Math.max(0, this.event.aliveEnemies - 1);
+            }
+        });
+
+        if (this.event.active && this.event.type === "horde") {
+            enemy.hordeEnemy = true;
+            this.event.spawnedEnemies++;
+            this.event.aliveEnemies++;
+        }
+
+        return enemy;
+    }
+
+    // ===================================================
+    getSpawnPosition() {
+        const px = this.player.x;
+        const py = this.player.y;
+
+        for (let i = 0; i < 20; i++) {
+            const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
+            const dist = Phaser.Math.Between(this.spawnRadius, this.spawnRadius + 300);
+
+            const x = px + Math.cos(angle) * dist;
+            const y = py + Math.sin(angle) * dist;
+
+            if (
+                x < 0 || x > this.scene.worldWidth ||
+                y < 0 || y > this.scene.worldHeight
+            ) continue;
+
+            return { x, y };
+        }
+
+        return null;
+    }
+
+    // ===================================================
+    updateEvents(dt) {
+        if (!this.event.active && this.elapsedTime >= this.nextEventAt) {
+            this.startEvent("horde");
+        }
+
+        if (
+            this.event.active &&
+            this.event.type === "horde" &&
+            this.event.spawnedEnemies >= this.event.totalEnemies &&
+            this.event.aliveEnemies <= 0
+        ) {
+            this.endEvent();
+        }
+    }
+
+    startEvent(type) {
+        this.event.active = true;
+        this.event.type = type;
+        this.event.timer = 0;
+
+        if (type === "horde") {
+            this.hordeNumber++;
+            this.event.totalEnemies = this.getHordeSize(this.hordeNumber);
+            this.event.spawnedEnemies = 0;
+            this.event.aliveEnemies = 0;
+            this.spawnAccumulator = 0;
+
+            this.scene.showHordeWarning?.(
+                "NOVA HORDA!",
+                `Horda ${this.hordeNumber}: ${this.event.totalEnemies} inimigos`
+            );
+        }
+
+        console.log("🔥 HORDE INICIADA");
+    }
+
+    endEvent() {
+        this.event.active = false;
+        this.event.type = null;
+        this.event.timer = 0;
+        this.event.totalEnemies = 0;
+        this.event.spawnedEnemies = 0;
+        this.event.aliveEnemies = 0;
+        this.nextEventAt = this.elapsedTime + this.hordeCooldown;
+
+        this.scene.showHordeWarning?.(
+            "NOVA HORDA EM BREVE",
+            `Proxima: ${this.getHordeSize(this.hordeNumber + 1)} inimigos`
+        );
+
+        console.log("🕯️ Horde finalizada");
+    }
+}
